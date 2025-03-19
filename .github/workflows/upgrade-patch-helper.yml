@@ -1,0 +1,150 @@
+on:
+  workflow_call:
+    inputs:
+      branch-to-compare-from:
+        required: true
+        type: string
+      branch-to-compare-to:
+        required: true
+        type: string
+      php-version:
+        required: true
+        type: string
+      with-gui-artifacts:
+        required: true
+        type: boolean
+    secrets:
+      composer-auth:
+        required: false
+
+jobs:
+  run-patch-helper:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Log Inputs
+        run: |
+          echo "Branch to compare from: ${{ inputs.branch-to-compare-from }}"
+          echo "Branch to compare to: ${{ inputs.branch-to-compare-to }}"
+          echo "PHP Version: ${{ inputs.php-version }}"
+          echo "With GUI Artifacts: ${{ inputs.with-gui-artifacts }}"
+
+      - name: PHP setup
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "${{ inputs.php-version }}"
+
+      - name: Composer self update
+        run: |
+          php --version
+          composer self-update --2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Install jsonlint
+        run: npm install -g jsonlint
+
+      - name: Setup Global Composer Auth
+        run: |
+          DEFAULT_AUTH_JSON='{}'
+          AUTH_JSON='${{ secrets.composer-auth }}'
+          if [[ -z "$AUTH_JSON" ]]; then
+            AUTH_JSON="$DEFAULT_AUTH_JSON"
+          fi
+          mkdir -p ~/.composer/
+          printf "%s" "$AUTH_JSON" > ~/.composer/auth.json
+          chmod 600 ~/.composer/auth.json
+          ls -lh ~/.composer/auth.json
+          jsonlint -q ~/.composer/auth.json
+
+      - name: Clone patch helper
+        uses: actions/checkout@v4
+        with:
+          repository: 'AmpersandHQ/ampersand-magento2-upgrade-patch-helper'
+          path: 'patch-helper'
+          fetch-depth: 1
+
+      - name: Clone branch to compare
+        uses: actions/checkout@v4
+        with:
+          ref: "${{ inputs.branch-to-compare-from }}"
+          path: 'compare'
+          fetch-depth: 1
+
+      - name: Clone current branch
+        uses: actions/checkout@v4
+        with:
+          ref: "${{ inputs.branch-to-compare-to }}"
+          path: 'current'
+          fetch-depth: 1
+
+      - name: Install helper
+        working-directory: ./patch-helper
+        run: |
+          pwd
+          composer install --no-dev --no-interaction
+
+      - name: Install branch to compare
+        working-directory: ./compare
+        run: |
+          composer install --no-dev --no-interaction --no-scripts --no-plugins --ignore-platform-reqs
+
+      - name: Install current branch
+        working-directory: ./current
+        run: |
+          echo "Installing without scripts or plugins"
+          composer install --no-dev --no-interaction --no-scripts --no-plugins --ignore-platform-reqs
+          echo "Triggering magento composer installer"
+          rm -rf vendor/magento/magento2-base/ vendor/magento/magento2-ee-base/
+          composer config --no-interaction allow-plugins.cweagans/composer-patches false || true
+          composer config --no-interaction allow-plugins.vaimo/composer-patches false    || true
+          composer install --no-dev --no-interaction --no-scripts --ignore-platform-reqs
+
+      - name: Prepare filesystem for report
+        run: |
+          mv compare/vendor current/vendor_orig
+          cd current
+          diff -urN vendor_orig vendor > vendor.patch || true
+
+      - name: Generate report
+        working-directory: ./current
+        run: |
+          pwd
+          php -d memory_limit=-1 ../patch-helper/bin/patch-helper.php analyse --show-info --sort-by-type . | tee ./patch-helper-output.txt
+
+      - name: Create classmap
+        working-directory: ./current
+        run: |
+          composer dump --classmap-authoritative
+          php -r "\$classmap=require_once('vendor/composer/autoload_classmap.php'); echo json_encode(\$classmap);" > classmap.json
+
+      - name: Upload artefacts (without GUI)
+        if: ${{ inputs.with-gui-artifacts == false }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: patch-helper-artifacts
+          path: |
+            ./current/vendor_files_to_check.patch
+            ./current/patch-helper-output.txt
+
+      - name: Upload artifacts (with GUI) - preparation
+        if: ${{ inputs.with-gui-artifacts == true }}
+        working-directory: ./current
+        shell: bash
+        run: |
+          tar -czf ./vendor.tar.gz ./vendor
+
+      - name: Upload artifacts (with GUI) - upload
+        if: ${{ inputs.with-gui-artifacts == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: patch-helper-artifacts
+          path: |
+            ./current/vendor_files_to_check.patch
+            ./current/vendor.patch
+            ./current/patch-helper-output.txt
+            ./current/vendor.tar.gz
+            ./current/classmap.json
