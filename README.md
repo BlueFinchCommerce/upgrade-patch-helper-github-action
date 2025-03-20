@@ -15,11 +15,11 @@ on:
   workflow_dispatch:
     inputs:
       branch-to-compare-from:
-        description: 'The branch to compare from, with your changes'
+        description: 'The branch to compare from, without your changes'
         type: string
         required: true
       branch-to-compare-to:
-        description: 'The branch to compare to, without your changes'
+        description: 'The branch to compare to, with your changes'
         type: string
         required: true
       php-version:
